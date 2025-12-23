@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <title>Classroom Escape</title>
+        <meta name="description" content="Escape from the school classroom horror classic game 3d." />
+        <link rel="icon" href="/favicon.ico" />
+        <style>
+            body {
+                background: #000;
+                margin: 0;
+                overflow: hidden;
+                color: #f00;
+                font-family: "Courier New", monospace;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+            }
+            canvas {
+                image-rendering: pixelated;
+                width: 100%;
+                height: 100%;
+                max-width: 1024px;
+                aspect-ratio: 4/3;
+                background: #000;
+                border: 2px solid #200;
+                display: none;
+            }
+            #menu,
+            #victory {
+                text-align: center;
+                z-index: 20;
+                position: absolute;
+            }
+            #victory {
+                display: none;
+                background: rgba(0, 0, 0, 0.9);
+                padding: 50px;
+                border: 2px solid #0f0;
+                color: #0f0;
+            }
+            button {
+                background: #200;
+                color: #f00;
+                border: 1px solid #f00;
+                padding: 10px 20px;
+                cursor: pointer;
+                font-family: inherit;
+                font-size: 1.2em;
+                margin: 10px;
+                transition: 0.3s;
+            }
+            button:hover {
+                background: #f00;
+                color: #000;
+            }
+            #ui {
+                position: absolute;
+                top: 20px;
+                left: 20px;
+                pointer-events: none;
+                text-shadow: 2px 2px 0 #000;
+                z-index: 10;
+                display: none;
+            }
+            #stamina-bar {
+                width: 100px;
+                height: 8px;
+                border: 1px solid #f00;
+                margin-top: 5px;
+            }
+            #stamina-fill {
+                width: 100%;
+                height: 100%;
+                background: #f00;
+            }
+            #door-prompt {
+                position: absolute;
+                bottom: 100px;
+                left: 50%;
+                transform: translateX(-50%);
+                color: #fff;
+                font-size: 1.5em;
+                display: none;
+                text-shadow: 2px 2px 4px #000;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="menu">
+            <h1 style="font-size: 3em; margin-bottom: 0">ABANDONED SCHOOL</h1>
+            <p>HIDE IN UNLOCKED CLASSROOMS TO SURVIVE</p>
+            <button onclick="startGame(1.0, false)">EASY</button>
+            <button onclick="startGame(1.4, false)">NORMAL</button>
+            <button onclick="startGame(1.9, true)">HARDCORE</button>
+        </div>
+
+        <div id="victory">
+            <h1 style="font-size: 3em">ESCAPED!</h1>
+            <p id="score-text"></p>
+            <button onclick="location.reload()">PLAY AGAIN</button>
+        </div>
+
+        <div id="ui">
+            <h2 id="msg">IT'S HUNTING YOU.</h2>
+            <p id="map-hint">WASD: Move | Shift: Sprint | E: Enter Door | M: Map</p>
+            Stamina:
+            <div id="stamina-bar"><div id="stamina-fill"></div></div>
+        </div>
+
+        <div id="door-prompt" style="display: none"></div>
+
+        <canvas id="screen" width="320" height="240"></canvas>
+
+        <script>
+            const canvas = document.getElementById("screen");
+            const ctx = canvas.getContext("2d");
+            const uiMsg = document.getElementById("msg");
+            const staminaFill = document.getElementById("stamina-fill");
+            const doorPrompt = document.getElementById("door-prompt");
+
+            // --- Audio Engine ---
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const stereoPanner = audioCtx.createStereoPanner();
+            stereoPanner.connect(audioCtx.destination);
+
+            const MAP_SIZE = 64;
+            const BLOCK_SIZE = 64;
+            const MONSTER_DETECT_RANGE = 15;
+            let map = [];
+            let classrooms = [];
+            let player = { x: 0, y: 0, dir: 0, stamina: 100, hiding: false, inRoom: null };
+            let monster = {
+                x: 0,
+                y: 0,
+                speed: 1.5,
+                path: [],
+                state: "hunt",
+                searchTimer: 0,
+                lastKnownX: 0,
+                lastKnownY: 0,
+                wanderTarget: null,
+            };
+            let input = { w: false, s: false, a: false, d: false, shift: false, e: false };
+            let showMap = false,
+                gameOver = false,
+                gameWon = false,
+                shake = 0,
+                stepTimer = 0,
+                gameActive = false;
+            let startTime,
+                isHardcore = false;
+
+            function startGame(speed, hardcore) {
+                monster.speed = speed;
+                isHardcore = hardcore;
+                document.getElementById("menu").style.display = "none";
+                document.getElementById("ui").style.display = "block";
+                if (isHardcore)
+                    document.getElementById("map-hint").innerHTML =
+                        "WASD: Move | Shift: Sprint | E: Enter Door | <span style='color:grey'>Map Disabled</span>";
+                canvas.style.display = "block";
+                if (audioCtx.state === "suspended") audioCtx.resume();
+                map = generateSchool();
+                startTime = Date.now();
+                gameActive = true;
+                update();
+            }
+
+            function playDoorSound(type) {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                if (type === "open") {
+                    osc.type = "sawtooth";
+                    osc.frequency.setValueAtTime(180, audioCtx.currentTime);
+                    osc.frequency.linearRampToValueAtTime(120, audioCtx.currentTime + 0.3);
+                    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+                    gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.3);
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.3);
+
+                    setTimeout(() => {
+                        const osc2 = audioCtx.createOscillator();
+                        const gain2 = audioCtx.createGain();
+                        osc2.type = "sawtooth";
+                        osc2.frequency.setValueAtTime(120, audioCtx.currentTime);
+                        osc2.frequency.linearRampToValueAtTime(80, audioCtx.currentTime + 0.2);
+                        gain2.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                        gain2.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.2);
+                        osc2.connect(gain2);
+                        gain2.connect(audioCtx.destination);
+                        osc2.start();
+                        osc2.stop(audioCtx.currentTime + 0.2);
+                    }, 100);
+                } else {
+                    for (let i = 0; i < 3; i++) {
+                        setTimeout(() => {
+                            const osc = audioCtx.createOscillator();
+                            const gain = audioCtx.createGain();
+                            osc.type = "square";
+                            osc.frequency.setValueAtTime(100 + Math.random() * 50, audioCtx.currentTime);
+                            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.08);
+                            osc.connect(gain);
+                            gain.connect(audioCtx.destination);
+                            osc.start();
+                            osc.stop(audioCtx.currentTime + 0.08);
+                        }, i * 100);
+                    }
+                }
+            }
+
+            function playMonsterSound(type, dist) {
+                const dx = monster.x - player.x;
+                const dy = monster.y - player.y;
+                const angleToMonster = Math.atan2(dy, dx);
+                let relativeAngle = angleToMonster - player.dir;
+
+                while (relativeAngle < -Math.PI) relativeAngle += Math.PI * 2;
+                while (relativeAngle > Math.PI) relativeAngle -= Math.PI * 2;
+
+                stereoPanner.pan.value = Math.sin(relativeAngle);
+
+                const maxDist = player.hiding ? 1200 : 800;
+                const vol = Math.pow(Math.max(0, 1 - dist / maxDist), 2);
+                if (vol <= 0.01) {
+                    return;
+                }
+
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                if (type === "step") {
+                    osc.type = "triangle";
+                    osc.frequency.setValueAtTime(40, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(8, audioCtx.currentTime + 0.2);
+                    gain.gain.setValueAtTime(vol * 2.5, audioCtx.currentTime);
+                    gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.2);
+                } else if (type === "search") {
+                    osc.type = "sine";
+                    osc.frequency.setValueAtTime(200 + Math.random() * 100, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(vol * 0.5, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+                } else {
+                    osc.type = "sawtooth";
+                    osc.frequency.setValueAtTime(120 + Math.random() * 250, audioCtx.currentTime);
+                    osc.frequency.linearRampToValueAtTime(500, audioCtx.currentTime + 0.1);
+                    osc.frequency.linearRampToValueAtTime(120, audioCtx.currentTime + 0.4);
+                    gain.gain.setValueAtTime(vol * 0.7, audioCtx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+                }
+
+                osc.connect(gain);
+                gain.connect(stereoPanner);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.6);
+            }
+
+            function getPath(start, end) {
+                let openList = [{ x: start.x, y: start.y, g: 0, h: 0, f: 0, parent: null }];
+                let closedList = [];
+                let iterations = 0;
+                const maxIterations = 500;
+
+                while (openList.length > 0 && iterations < maxIterations) {
+                    iterations++;
+                    let lowIdx = 0;
+                    for (let i = 0; i < openList.length; i++) if (openList[i].f < openList[lowIdx].f) lowIdx = i;
+                    let curr = openList[lowIdx];
+
+                    if (curr.x === end.x && curr.y === end.y) {
+                        let path = [];
+                        while (curr.parent) {
+                            path.push(curr);
+                            curr = curr.parent;
+                        }
+                        return path.reverse();
+                    }
+
+                    openList.splice(lowIdx, 1);
+                    closedList.push(curr);
+
+                    [
+                        [0, 1],
+                        [0, -1],
+                        [1, 0],
+                        [-1, 0],
+                    ].forEach((d) => {
+                        let nx = curr.x + d[0],
+                            ny = curr.y + d[1];
+                        if (nx < 0 || nx >= MAP_SIZE || ny < 0 || ny >= MAP_SIZE) return;
+                        if (map[ny][nx] === 1 || map[ny][nx] === 4) return;
+                        if (closedList.find((n) => n.x === nx && n.y === ny)) return;
+
+                        let g = curr.g + 1;
+                        let h = Math.abs(nx - end.x) + Math.abs(ny - end.y);
+                        let existing = openList.find((n) => n.x === nx && n.y === ny);
+
+                        if (!existing) {
+                            openList.push({ x: nx, y: ny, g, h, f: g + h, parent: curr });
+                        } else if (g < existing.g) {
+                            existing.g = g;
+                            existing.f = g + existing.h;
+                            existing.parent = curr;
+                        }
+                    });
+                }
+                return [];
+            }
+
+            function generateSchool() {
+                let grid = Array(MAP_SIZE)
+                    .fill()
+                    .map(() => Array(MAP_SIZE).fill(1));
+                classrooms = [];
+
+                for (let y = 3; y < MAP_SIZE - 3; y += 6) {
+                    for (let x = 1; x < MAP_SIZE - 1; x++) {
+                        grid[y][x] = 0;
+                    }
+                }
+
+                for (let x = 5; x < MAP_SIZE - 5; x += 8) {
+                    for (let y = 1; y < MAP_SIZE - 1; y++) {
+                        grid[y][x] = 0;
+                    }
+                }
+
+                for (let y = 8; y < MAP_SIZE - 8; y += 12) {
+                    for (let x = 1; x < MAP_SIZE - 1; x++) {
+                        grid[y][x] = 0;
+                    }
+                }
+
+                for (let x = 10; x < MAP_SIZE - 10; x += 15) {
+                    for (let y = 1; y < MAP_SIZE - 1; y++) {
+                        grid[y][x] = 0;
+                    }
+                }
+
+                const roomConfigs = [
+                    { w: 5, h: 4 },
+                    { w: 6, h: 4 },
+                    { w: 5, h: 5 },
+                    { w: 7, h: 4 },
+                ];
+
+                for (let cy = 5; cy < MAP_SIZE - 8; cy += 8) {
+                    for (let cx = 7; cx < MAP_SIZE - 10; cx += 12) {
+                        let config = roomConfigs[Math.floor(Math.random() * roomConfigs.length)];
+                        let rw = config.w;
+                        let rh = config.h;
+
+                        for (let ry = 0; ry < rh; ry++) {
+                            for (let rx = 0; rx < rw; rx++) {
+                                if (cy + ry < MAP_SIZE - 1 && cx + rx < MAP_SIZE - 1) {
+                                    grid[cy + ry][cx + rx] = 0;
+                                }
+                            }
+                        }
+
+                        let isUnlocked = Math.random() < 0.3;
+                        let doorY = cy - 1;
+                        let doorX = cx + Math.floor(rw / 2);
+
+                        if (doorY > 0 && doorX < MAP_SIZE - 1) {
+                            grid[doorY][doorX] = isUnlocked ? 3 : 4;
+
+                            if (isUnlocked) {
+                                classrooms.push({
+                                    x: cx,
+                                    y: cy,
+                                    w: rw,
+                                    h: rh,
+                                    doorX: doorX,
+                                    doorY: doorY,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                for (let i = 0; i < 150; i++) {
+                    let rx = Math.floor(Math.random() * (MAP_SIZE - 2)) + 1;
+                    let ry = Math.floor(Math.random() * (MAP_SIZE - 2)) + 1;
+                    if (grid[ry][rx] === 1) grid[ry][rx] = 0;
+                }
+
+                for (let i = MAP_SIZE - 10; i < MAP_SIZE - 1; i++) {
+                    grid[i][MAP_SIZE - 5] = 0;
+                    grid[MAP_SIZE - 5][i] = 0;
+                }
+
+                let playerSpawned = false;
+                for (let attempts = 0; attempts < 100 && !playerSpawned; attempts++) {
+                    let testX = Math.floor(Math.random() * 15) + 5;
+                    let testY = Math.floor(Math.random() * 15) + 5;
+
+                    if (grid[testY][testX] === 0) {
+                        player.x = (testX + 0.5) * BLOCK_SIZE;
+                        player.y = (testY + 0.5) * BLOCK_SIZE;
+                        playerSpawned = true;
+                    }
+                }
+
+                if (!playerSpawned) {
+                    player.x = 5.5 * BLOCK_SIZE;
+                    player.y = 5.5 * BLOCK_SIZE;
+                    grid[5][5] = 0;
+                    grid[5][6] = 0;
+                    grid[6][5] = 0;
+                }
+
+                let exitX = MAP_SIZE - 5;
+                let exitY = MAP_SIZE - 5;
+
+                for (let dy = -2; dy <= 2; dy++) {
+                    for (let dx = -2; dx <= 2; dx++) {
+                        let ex = exitX + dx;
+                        let ey = exitY + dy;
+                        if (ex > 0 && ex < MAP_SIZE - 1 && ey > 0 && ey < MAP_SIZE - 1) {
+                            grid[ey][ex] = 0;
+                        }
+                    }
+                }
+
+                grid[exitY][exitX] = 2;
+
+                let monsterSpawned = false;
+                for (let attempts = 0; attempts < 100 && !monsterSpawned; attempts++) {
+                    let testX = MAP_SIZE - Math.floor(Math.random() * 15) - 10;
+                    let testY = MAP_SIZE - Math.floor(Math.random() * 15) - 10;
+
+                    if (grid[testY][testX] === 0) {
+                        monster.x = (testX + 0.5) * BLOCK_SIZE;
+                        monster.y = (testY + 0.5) * BLOCK_SIZE;
+                        monsterSpawned = true;
+                    }
+                }
+
+                if (!monsterSpawned) {
+                    monster.x = (MAP_SIZE - 8.5) * BLOCK_SIZE;
+                    monster.y = (MAP_SIZE - 8.5) * BLOCK_SIZE;
+                    grid[MAP_SIZE - 8][MAP_SIZE - 8] = 0;
+                }
+
+                monster.state = "hunt";
+
+                return grid;
+            }
+
+            function checkNearDoor() {
+                let px = Math.floor(player.x / BLOCK_SIZE);
+                let py = Math.floor(player.y / BLOCK_SIZE);
+
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        let checkX = px + dx;
+                        let checkY = py + dy;
+                        if (checkX >= 0 && checkX < MAP_SIZE && checkY >= 0 && checkY < MAP_SIZE) {
+                            let tile = map[checkY][checkX];
+                            if (tile === 3 || tile === 4) {
+                                return { x: checkX, y: checkY, unlocked: tile === 3 };
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+
+            function enterClassroom(doorX, doorY) {
+                let room = classrooms.find((r) => r.doorX === doorX && r.doorY === doorY);
+                if (room) {
+                    playDoorSound("open");
+                    player.hiding = true;
+                    player.inRoom = room;
+                    uiMsg.innerText = "HIDING... STAY QUIET";
+
+                    player.x = (room.x + 1) * BLOCK_SIZE;
+                    player.y = (room.y + 1) * BLOCK_SIZE;
+
+                    if (monster.state === "hunt") {
+                        monster.state = "search";
+                        monster.lastKnownX = player.x;
+                        monster.lastKnownY = player.y;
+                        monster.searchTimer = 300;
+                    }
+                }
+            }
+
+            function exitClassroom() {
+                if (player.inRoom) {
+                    player.hiding = false;
+                    player.x = (player.inRoom.doorX + 0.5) * BLOCK_SIZE;
+                    player.y = (player.inRoom.doorY + 1.5) * BLOCK_SIZE;
+                    player.inRoom = null;
+                    uiMsg.innerText = "IT'S HUNTING YOU.";
+
+                    let dist = Math.hypot(player.x - monster.x, player.y - monster.y);
+                    let blockDist = dist / BLOCK_SIZE;
+
+                    if (blockDist <= MONSTER_DETECT_RANGE) {
+                        monster.state = "hunt";
+                        monster.lastKnownX = player.x;
+                        monster.lastKnownY = player.y;
+                        monster.path = [];
+                    }
+                }
+            }
+
+            function update() {
+                if (gameOver || gameWon || !gameActive) {
+                    if (gameOver) drawJumpscare();
+                    return;
+                }
+
+                let nearDoor = checkNearDoor();
+                if (nearDoor && !player.hiding && input.e) {
+                    if (nearDoor.unlocked) {
+                        enterClassroom(nearDoor.x, nearDoor.y);
+                    } else {
+                        playDoorSound("locked");
+                    }
+                    input.e = false;
+                }
+
+                if (player.hiding && input.e) {
+                    exitClassroom();
+                    input.e = false;
+                }
+
+                if (!player.hiding) {
+                    let isSprinting = input.shift && player.stamina > 0 && (input.w || input.s);
+                    player.stamina = isSprinting ? player.stamina - 0.7 : Math.min(100, player.stamina + 0.35);
+                    staminaFill.style.width = player.stamina + "%";
+
+                    let pSpeed = isSprinting ? 5.6 : 2.8;
+                    if (input.a) player.dir -= 0.065;
+                    if (input.d) player.dir += 0.065;
+                    let pMX = input.w ? Math.cos(player.dir) * pSpeed : input.s ? -Math.cos(player.dir) * pSpeed : 0;
+                    let pMY = input.w ? Math.sin(player.dir) * pSpeed : input.s ? -Math.sin(player.dir) * pSpeed : 0;
+
+                    const checkWall = (x, y) => {
+                        let tile = map[Math.floor(y / BLOCK_SIZE)][Math.floor(x / BLOCK_SIZE)];
+                        return tile === 0 || tile === 3;
+                    };
+
+                    const checkExit = (x, y) => map[Math.floor(y / BLOCK_SIZE)][Math.floor(x / BLOCK_SIZE)] === 2;
+
+                    if (checkExit(player.x + pMX, player.y + pMY)) {
+                        winGame();
+                        return;
+                    }
+                    if (checkWall(player.x + pMX, player.y)) player.x += pMX;
+                    if (checkWall(player.x, player.y + pMY)) player.y += pMY;
+                }
+
+                let mGridX = Math.floor(monster.x / BLOCK_SIZE),
+                    mGridY = Math.floor(monster.y / BLOCK_SIZE);
+                let pGridX = Math.floor(player.x / BLOCK_SIZE),
+                    pGridY = Math.floor(player.y / BLOCK_SIZE);
+                let dist = Math.hypot(player.x - monster.x, player.y - monster.y);
+
+                if (monster.state === "hunt") {
+                    if (stepTimer % 15 === 0) {
+                        monster.path = getPath({ x: mGridX, y: mGridY }, { x: pGridX, y: pGridY });
+                    }
+
+                    if (player.hiding && dist > 150) {
+                        monster.state = "search";
+                        monster.lastKnownX = player.x;
+                        monster.lastKnownY = player.y;
+                        monster.searchTimer = 400;
+                    }
+                } else if (monster.state === "search") {
+                    monster.searchTimer--;
+
+                    if (stepTimer % 30 === 0 && Math.random() < 0.3) {
+                        playMonsterSound("search", dist);
+                    }
+
+                    if (!player.hiding) {
+                        if (dist < 300) {
+                            monster.state = "hunt";
+                            monster.path = [];
+                        }
+                    }
+
+                    if (stepTimer % 25 === 0) {
+                        let patrolRadius = 5;
+                        let lkGridX = Math.floor(monster.lastKnownX / BLOCK_SIZE);
+                        let lkGridY = Math.floor(monster.lastKnownY / BLOCK_SIZE);
+
+                        let patrolX = lkGridX + Math.floor(Math.random() * patrolRadius * 2) - patrolRadius;
+                        let patrolY = lkGridY + Math.floor(Math.random() * patrolRadius * 2) - patrolRadius;
+
+                        patrolX = Math.max(1, Math.min(MAP_SIZE - 2, patrolX));
+                        patrolY = Math.max(1, Math.min(MAP_SIZE - 2, patrolY));
+
+                        monster.path = getPath({ x: mGridX, y: mGridY }, { x: patrolX, y: patrolY });
+                    }
+
+                    if (monster.searchTimer <= 0) {
+                        monster.state = "wander";
+                        monster.wanderTarget = {
+                            x: Math.floor(Math.random() * (MAP_SIZE - 4)) + 2,
+                            y: Math.floor(Math.random() * (MAP_SIZE - 4)) + 2,
+                        };
+                    }
+                } else if (monster.state === "wander") {
+                    if (!player.hiding && dist < 250) {
+                        monster.state = "hunt";
+                        monster.path = [];
+                    }
+
+                    if (monster.wanderTarget) {
+                        if (stepTimer % 25 === 0) {
+                            monster.path = getPath({ x: mGridX, y: mGridY }, monster.wanderTarget);
+                        }
+
+                        let targetDist = Math.hypot(
+                            monster.x - monster.wanderTarget.x * BLOCK_SIZE,
+                            monster.y - monster.wanderTarget.y * BLOCK_SIZE,
+                        );
+
+                        if (targetDist < 30) {
+                            monster.wanderTarget = {
+                                x: Math.floor(Math.random() * (MAP_SIZE - 4)) + 2,
+                                y: Math.floor(Math.random() * (MAP_SIZE - 4)) + 2,
+                            };
+                        }
+                    }
+                }
+
+                if (monster.path.length > 0) {
+                    let t = monster.path[0];
+                    let tx = (t.x + 0.5) * BLOCK_SIZE,
+                        ty = (t.y + 0.5) * BLOCK_SIZE;
+                    let adx = tx - monster.x,
+                        ady = ty - monster.y;
+                    let aD = Math.hypot(adx, ady);
+                    if (aD < 5) {
+                        monster.path.shift();
+                    } else {
+                        let moveSpeed =
+                            monster.state === "search"
+                                ? monster.speed * 0.5
+                                : monster.state === "wander"
+                                  ? monster.speed * 0.3
+                                  : monster.speed;
+                        monster.x += (adx / aD) * moveSpeed;
+                        monster.y += (ady / aD) * moveSpeed;
+                    }
+                }
+
+                stepTimer++;
+                let stepInterval = monster.state === "hunt" ? 18 : monster.state === "search" ? 35 : 50;
+                if (stepTimer % stepInterval === 0) playMonsterSound("step", dist);
+                if (monster.state === "hunt" && Math.random() < 0.004) playMonsterSound("growl", dist);
+
+                if (dist < 40 && !player.hiding) {
+                    gameOver = true;
+                    shake = 40;
+                    const s = audioCtx.createOscillator();
+                    s.type = "sawtooth";
+                    s.frequency.setValueAtTime(400, audioCtx.currentTime);
+                    s.frequency.exponentialRampToValueAtTime(20, audioCtx.currentTime + 1.5);
+                    s.connect(audioCtx.destination);
+                    s.start();
+                    s.stop(audioCtx.currentTime + 1.5);
+                    setTimeout(() => location.reload(), 2500);
+                }
+
+                render();
+                requestAnimationFrame(update);
+            }
+
+            function winGame() {
+                gameWon = true;
+                gameActive = false;
+                let timeTaken = (Date.now() - startTime) / 1000;
+                let score = Math.floor(100000 / timeTaken);
+                document.getElementById("ui").style.display = "none";
+                document.getElementById("victory").style.display = "block";
+                document.getElementById("score-text").innerText = `Time: ${timeTaken.toFixed(2)}s | Final Score: ${score}`;
+            }
+
+            function drawCreature(sx, sh, mDist) {
+                let t = Date.now() * 0.001;
+
+                let legCycle = Math.sin(stepTimer * 0.15) * 0.15;
+                let walkBob = Math.abs(Math.sin(stepTimer * 0.15)) * 3;
+
+                let stateMultiplier = monster.state === "hunt" ? 1.2 : monster.state === "search" ? 0.6 : 0.4;
+
+                let b = Math.max(0, 255 - mDist * 0.4);
+                let brownBase = Math.min(255, b);
+
+                let baseY = 120 + sh * 0.25;
+
+                ctx.fillStyle = "rgba(0,0,0,0.4)";
+                ctx.fillRect(sx - sh * 0.25, baseY, sh * 0.5, 4);
+
+                ctx.fillStyle = `rgb(${brownBase * 0.35},${brownBase * 0.28},${brownBase * 0.2})`;
+                let legSpread = 8 * stateMultiplier;
+                ctx.fillRect(sx - legSpread + legCycle * 10, baseY - sh * 0.4 - walkBob, 6, sh * 0.4);
+                ctx.fillRect(sx + legSpread - 6 - legCycle * 10, baseY - sh * 0.4 - walkBob, 6, sh * 0.4);
+
+                let bodyW = sh * 0.3;
+                let bodyH = sh * 0.45;
+                ctx.fillStyle = `rgb(${brownBase * 0.4},${brownBase * 0.32},${brownBase * 0.22})`;
+                ctx.fillRect(sx - bodyW / 2, baseY - sh * 0.65 - walkBob, bodyW, bodyH);
+
+                ctx.fillStyle = `rgb(${brownBase * 0.28},${brownBase * 0.22},${brownBase * 0.16})`;
+                for (let i = 0; i < 4; i++) {
+                    ctx.fillRect(sx - 2, baseY - sh * 0.6 + i * 6 - walkBob, 4, 2);
+                }
+
+                let headW = sh * 0.26;
+                let headH = sh * 0.3;
+                ctx.fillStyle = `rgb(${brownBase * 0.48},${brownBase * 0.38},${brownBase * 0.28})`;
+                ctx.fillRect(sx - headW / 2, baseY - sh * 0.85 - walkBob, headW, headH);
+
+                let eyeIntensity = monster.state === "hunt" ? 1 : monster.state === "search" ? 0.6 : 0.3;
+                let eyeGlow = (Math.sin(t * 8) * 30 + 200) * eyeIntensity;
+                ctx.fillStyle = `rgb(${eyeGlow},${eyeGlow * 0.3},0)`;
+                let eyeY = baseY - sh * 0.75 - walkBob;
+                ctx.fillRect(sx - headW / 3, eyeY, headW * 0.22, headH * 0.18);
+                ctx.fillRect(sx + headW / 8, eyeY, headW * 0.22, headH * 0.18);
+
+                if (monster.state === "hunt") {
+                    let mouthOpen = Math.sin(t * 10) * 2 + 5;
+                    ctx.fillStyle = "#000";
+                    ctx.fillRect(sx - headW / 4, baseY - sh * 0.6 - walkBob, headW / 2, mouthOpen);
+                }
+
+                ctx.fillStyle = `rgb(${brownBase * 0.32},${brownBase * 0.26},${brownBase * 0.19})`;
+                let armReach = monster.state === "hunt" ? 12 : monster.state === "search" ? 6 : 3;
+                let armSwing = Math.sin(stepTimer * 0.15) * armReach;
+
+                ctx.fillRect(sx - bodyW / 2 - 4, baseY - sh * 0.6 - walkBob, 4, sh * 0.35);
+                ctx.fillRect(sx - bodyW / 2 - 8 - armSwing, baseY - sh * 0.3 - walkBob, 8, 3);
+                ctx.fillRect(sx + bodyW / 2, baseY - sh * 0.6 - walkBob, 4, sh * 0.35);
+                ctx.fillRect(sx + bodyW / 2 + armSwing, baseY - sh * 0.3 - walkBob, 8, 3);
+            }
+
+            function render() {
+                ctx.save();
+                if (shake > 0) {
+                    ctx.translate(Math.random() * shake - shake / 2, Math.random() * shake - shake / 2);
+                    shake *= 0.9;
+                }
+
+                ctx.fillStyle = player.hiding ? "#020100" : "#050200";
+                ctx.fillRect(0, 0, 320, 240);
+
+                const zB = new Array(320).fill(Infinity);
+                for (let i = 0; i < 320; i++) {
+                    let rD = player.dir - Math.PI / 6 + (i / 320) * (Math.PI / 3);
+                    let rx = Math.cos(rD),
+                        ry = Math.sin(rD);
+                    let d = 0,
+                        hit = 0;
+                    while (d < 600 && hit === 0) {
+                        d += 3;
+                        let cx = Math.floor((player.x + rx * d) / BLOCK_SIZE),
+                            cy = Math.floor((player.y + ry * d) / BLOCK_SIZE);
+                        if (map[cy] && map[cy][cx] > 0) hit = map[cy][cx];
+                    }
+                    let dist = d * Math.cos(rD - player.dir);
+                    zB[i] = dist;
+                    let h = (BLOCK_SIZE * 250) / dist;
+                    let br = Math.max(0, 180 - dist * 0.5);
+
+                    if (hit === 2) {
+                        ctx.fillStyle = `rgb(0,${br * 0.7},0)`;
+                    } else if (hit === 3 || hit === 4) {
+                        ctx.fillStyle = `rgb(${br * 0.6},${br * 0.15},${br * 0.15}`;
+                    } else {
+                        ctx.fillStyle = `rgb(${br * 0.4},${br * 0.45},${br * 0.35})`;
+                    }
+                    ctx.fillRect(i, 120 - h / 2, 1, h);
+
+                    if (hit === 1 && Math.random() > 0.96) {
+                        let darkness = Math.random() * 0.5;
+                        ctx.fillStyle = `rgb(${br * 0.2 * darkness},${br * 0.25 * darkness},${br * 0.2 * darkness})`;
+                        ctx.fillRect(i, 120 - h / 2 + Math.random() * h, 1, Math.random() * 10 + 2);
+                    }
+                }
+
+                let mdX = monster.x - player.x,
+                    mdY = monster.y - player.y;
+                let mDist = Math.hypot(mdX, mdY),
+                    mAng = Math.atan2(mdY, mdX) - player.dir;
+                if (mAng < -Math.PI) mAng += 2 * Math.PI;
+                if (mAng > Math.PI) mAng -= 2 * Math.PI;
+
+                let showMonster = !player.hiding || mDist < 100;
+
+                if (showMonster && Math.abs(mAng) < Math.PI / 3) {
+                    let sx = (mAng + Math.PI / 6) * (320 / (Math.PI / 3));
+                    let sh = (BLOCK_SIZE * 400) / mDist;
+                    if (sx >= 0 && sx < 320 && mDist < zB[Math.floor(sx)]) drawCreature(sx, sh, mDist);
+                }
+                ctx.restore();
+                if (showMap && !isHardcore) drawMinimap();
+            }
+
+            function drawMinimap() {
+                const s = 2;
+                ctx.fillStyle = "rgba(0,0,0,0.85)";
+                ctx.fillRect(5, 5, MAP_SIZE * s, MAP_SIZE * s);
+                for (let y = 0; y < MAP_SIZE; y++) {
+                    for (let x = 0; x < MAP_SIZE; x++) {
+                        if (map[y][x] === 1) ctx.fillStyle = "#333";
+                        else if (map[y][x] === 2) ctx.fillStyle = "#0f0";
+                        else if (map[y][x] === 3 || map[y][x] === 4) ctx.fillStyle = "#a00";
+                        else continue;
+                        ctx.fillRect(5 + x * s, 5 + y * s, s, s);
+                    }
+                }
+
+                if (!player.hiding) {
+                    ctx.fillStyle = "#0f0";
+                    ctx.fillRect(5 + (player.x / BLOCK_SIZE) * s - 1, 5 + (player.y / BLOCK_SIZE) * s - 1, 2, 2);
+                }
+
+                let monsterColor = monster.state === "hunt" ? "#f0f" : monster.state === "search" ? "#fa0" : "#888";
+                ctx.fillStyle = monsterColor;
+                ctx.fillRect(5 + (monster.x / BLOCK_SIZE) * s - 1, 5 + (monster.y / BLOCK_SIZE) * s - 1, 2, 2);
+            }
+
+            function drawJumpscare() {
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, 320, 240);
+
+                let t = Date.now() % 1000;
+                let shake = Math.sin(t * 0.05) * 3;
+                let pulse = Math.sin(t * 0.01) * 0.2 + 1;
+
+                ctx.save();
+                ctx.translate(160 + shake, 120 + Math.random() * 2);
+                ctx.scale(pulse, pulse);
+
+                ctx.fillStyle = "#3d2817";
+                ctx.fillRect(-80, -60, 160, 100);
+
+                ctx.fillStyle = "#2a1a0f";
+                for (let i = 0; i < 15; i++) {
+                    let rx = -70 + Math.random() * 140;
+                    let ry = -50 + Math.random() * 90;
+                    ctx.fillRect(rx, ry, Math.random() * 20 + 5, Math.random() * 3 + 1);
+                }
+
+                let eyeFlash = t % 200 < 100 ? 1 : 0.3;
+                ctx.fillStyle = `rgba(255, 80, 0, ${eyeFlash})`;
+                ctx.fillRect(-45, -25, 25, 18);
+                ctx.fillRect(20, -25, 25, 18);
+
+                ctx.fillStyle = `rgba(255, 180, 0, ${eyeFlash * 0.8})`;
+                ctx.fillRect(-38, -20, 11, 8);
+                ctx.fillRect(27, -20, 11, 8);
+
+                let mouthOpen = Math.sin(t * 0.015) * 8 + 35;
+                ctx.fillStyle = "#000";
+                ctx.fillRect(-40, 10, 80, mouthOpen);
+
+                ctx.fillStyle = "#e8dcc8";
+                for (let i = 0; i < 8; i++) {
+                    let tx = -35 + i * 10;
+                    ctx.fillRect(tx, 10, 6, 8 + Math.random() * 6);
+                    ctx.fillRect(tx, 10 + mouthOpen - 8, 6, 8 + Math.random() * 4);
+                }
+
+                if (t % 300 < 150) {
+                    ctx.fillStyle = "#1a0a05";
+                    for (let i = 0; i < 5; i++) {
+                        let dx = -30 + i * 15;
+                        let dripLen = (t % 150) * 0.3;
+                        ctx.fillRect(dx, 10 + mouthOpen, 3, dripLen);
+                    }
+                }
+
+                let armReach = Math.sin(t * 0.008) * 40 + 40;
+                ctx.fillStyle = "#4a3425";
+                ctx.fillRect(-80 - armReach, -20, armReach, 12);
+                ctx.fillRect(-85 - armReach, -25, 15, 8);
+                ctx.fillRect(80, -20, armReach, 12);
+                ctx.fillRect(70 + armReach, -25, 15, 8);
+
+                ctx.restore();
+
+                let gradient = ctx.createRadialGradient(160, 120, 50, 160, 120, 200);
+                gradient.addColorStop(0, "rgba(0,0,0,0)");
+                gradient.addColorStop(1, "rgba(0,0,0,0.8)");
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, 320, 240);
+            }
+
+            document.onkeydown = (e) => {
+                let k = e.key.toLowerCase();
+                if (k === "w") input.w = true;
+                if (k === "s") input.s = true;
+                if (k === "a") input.a = true;
+                if (k === "d") input.d = true;
+                if (k === "e") input.e = true;
+                if (k === "m" && !isHardcore) showMap = !showMap;
+                if (e.shiftKey) input.shift = true;
+            };
+            document.onkeyup = (e) => {
+                let k = e.key.toLowerCase();
+                if (k === "w") input.w = false;
+                if (k === "s") input.s = false;
+                if (k === "a") input.a = false;
+                if (k === "d") input.d = false;
+                if (k === "e") input.e = false;
+                if (!e.shiftKey) input.shift = false;
+            };
+        </script>
+    </body>
+</html>
