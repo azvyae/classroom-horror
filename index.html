@@ -2,6 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
         <title>Classroom Escape</title>
         <meta name="description" content="Escape from the school classroom horror classic game 3d." />
         <link rel="icon" href="/favicon.ico" />
@@ -16,6 +17,7 @@
                 align-items: center;
                 justify-content: center;
                 height: 100vh;
+                touch-action: none; /* Prevent browser zooming/scrolling */
             }
             canvas {
                 image-rendering: pixelated;
@@ -32,11 +34,12 @@
                 text-align: center;
                 z-index: 20;
                 position: absolute;
+                width: 100%;
             }
             #victory {
                 display: none;
                 background: rgba(0, 0, 0, 0.9);
-                padding: 50px;
+                padding: 20px;
                 border: 2px solid #0f0;
                 color: #0f0;
             }
@@ -50,6 +53,7 @@
                 font-size: 1.2em;
                 margin: 10px;
                 transition: 0.3s;
+                user-select: none;
             }
             button:hover {
                 background: #f00;
@@ -84,6 +88,97 @@
                 font-size: 1.5em;
                 display: none;
                 text-shadow: 2px 2px 4px #000;
+                z-index: 15;
+            }
+
+            /* --- Mobile Controls --- */
+            #mobile-controls {
+                display: none;
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                z-index: 15;
+                pointer-events: none; /* Let touches pass through to canvas for looking */
+            }
+            
+            .touch-btn {
+                position: absolute;
+                background: rgba(50, 0, 0, 0.5);
+                border: 2px solid #f00;
+                border-radius: 50%;
+                color: #fff;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 24px;
+                pointer-events: auto; /* Re-enable clicks for buttons */
+                user-select: none;
+                touch-action: manipulation;
+            }
+            .touch-btn:active {
+                background: rgba(255, 0, 0, 0.5);
+            }
+
+            /* D-Pad */
+            #dpad {
+                position: absolute;
+                bottom: 40px;
+                left: 40px;
+                width: 150px;
+                height: 150px;
+                pointer-events: none;
+            }
+            #btn-up { top: 0; left: 50px; width: 50px; height: 50px; }
+            #btn-down { bottom: 0; left: 50px; width: 50px; height: 50px; }
+            #btn-left { top: 50px; left: 0; width: 50px; height: 50px; }
+            #btn-right { top: 50px; right: 0; width: 50px; height: 50px; }
+
+            /* Action Buttons */
+            #actions {
+                position: absolute;
+                bottom: 40px;
+                right: 40px;
+                width: 160px;
+                height: 160px;
+                pointer-events: none;
+            }
+            #btn-interact { 
+                top: 0; right: 0; width: 70px; height: 70px; 
+                background: rgba(0, 0, 50, 0.5); border-color: #aaf;
+            }
+            #btn-run { 
+                bottom: 0; left: 0; width: 60px; height: 60px; 
+                font-size: 14px;
+            }
+            #btn-map {
+                position: absolute;
+                top: 20px;
+                right: 20px;
+                width: 50px;
+                height: 50px;
+                border-radius: 8px;
+            }
+            #btn-fullscreen {
+                position: absolute;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 120px;
+                height: 40px;
+                border-radius: 4px;
+                font-size: 14px;
+                background: rgba(0, 50, 0, 0.5);
+                border-color: #0f0;
+                color: #0f0;
+                pointer-events: auto;
+            }
+
+            /* Show controls on touch devices or small screens */
+            @media (hover: none) and (pointer: coarse), (max-width: 1024px) {
+                #mobile-controls { display: block; }
+                #map-hint { display: none; } /* Hide PC controls hint */
             }
         </style>
     </head>
@@ -110,6 +205,23 @@
         </div>
 
         <div id="door-prompt" style="display: none"></div>
+
+        <div id="mobile-controls">
+            <button id="btn-fullscreen" class="touch-btn" onclick="toggleFullscreen()">FULLSCREEN</button>
+            <button id="btn-map" class="touch-btn">MAP</button>
+
+            <div id="dpad">
+                <div id="btn-up" class="touch-btn">▲</div>
+                <div id="btn-down" class="touch-btn">▼</div>
+                <div id="btn-left" class="touch-btn">◄</div>
+                <div id="btn-right" class="touch-btn">►</div>
+            </div>
+
+            <div id="actions">
+                <div id="btn-interact" class="touch-btn">E</div>
+                <div id="btn-run" class="touch-btn">RUN</div>
+            </div>
+        </div>
 
         <canvas id="screen" width="320" height="240"></canvas>
 
@@ -152,21 +264,99 @@
             let startTime,
                 isHardcore = false;
 
+            // --- Touch & Mobile Logic ---
+            let lastTouchX = null;
+            const SENSITIVITY = 0.008;
+
+            function setupMobileControls() {
+                // Prevent default touch behaviors (scrolling, zooming)
+                document.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+
+                const bindBtn = (id, key) => {
+                    const btn = document.getElementById(id);
+                    btn.addEventListener("touchstart", (e) => { e.preventDefault(); input[key] = true; });
+                    btn.addEventListener("touchend", (e) => { e.preventDefault(); input[key] = false; });
+                };
+
+                bindBtn("btn-up", "w");
+                bindBtn("btn-down", "s");
+                // Strafe buttons
+                bindBtn("btn-left", "a"); // Standard strafe (turns camera in current code, logic preserved)
+                bindBtn("btn-right", "d");
+                
+                bindBtn("btn-run", "shift");
+                
+                // Interaction needs a momentary press logic, but current update() handles continuous 'e' check ok
+                bindBtn("btn-interact", "e"); 
+
+                // Map Toggle
+                const mapBtn = document.getElementById("btn-map");
+                mapBtn.addEventListener("touchstart", (e) => {
+                    e.preventDefault();
+                    if (!isHardcore) showMap = !showMap;
+                });
+
+                // Swipe for Camera
+                canvas.addEventListener("touchstart", (e) => {
+                    // Only track single finger swipes on the canvas/background
+                    if(e.touches.length === 1) {
+                        lastTouchX = e.touches[0].clientX;
+                    }
+                });
+
+                canvas.addEventListener("touchmove", (e) => {
+                    if (!gameActive || lastTouchX === null) return;
+                    const touchX = e.touches[0].clientX;
+                    const deltaX = touchX - lastTouchX;
+                    player.dir += deltaX * SENSITIVITY;
+                    lastTouchX = touchX;
+                });
+
+                canvas.addEventListener("touchend", () => {
+                    lastTouchX = null;
+                });
+            }
+
+            async function toggleFullscreen() {
+                if (!document.fullscreenElement) {
+                    try {
+                        await document.documentElement.requestFullscreen();
+                        if (screen.orientation && screen.orientation.lock) {
+                            await screen.orientation.lock("landscape").catch(err => console.log("Orientation lock failed (likely not supported on this device/browser):", err));
+                        }
+                    } catch (err) {
+                        console.error("Error attempting to enable fullscreen:", err);
+                    }
+                } else {
+                    if (document.exitFullscreen) {
+                        document.exitFullscreen();
+                    }
+                }
+            }
+
             function startGame(speed, hardcore) {
                 monster.speed = speed;
                 isHardcore = hardcore;
                 document.getElementById("menu").style.display = "none";
                 document.getElementById("ui").style.display = "block";
-                if (isHardcore)
-                    document.getElementById("map-hint").innerHTML =
-                        "WASD: Move | Shift: Sprint | E: Enter Door | <span style='color:grey'>Map Disabled</span>";
+                
+                // Hardcore UI Update
+                if (isHardcore) {
+                    document.getElementById("map-hint").innerHTML = "WASD: Move | Shift: Sprint | E: Enter Door | <span style='color:grey'>Map Disabled</span>";
+                    document.getElementById("btn-map").style.display = 'none';
+                }
+
                 canvas.style.display = "block";
                 if (audioCtx.state === "suspended") audioCtx.resume();
                 map = generateSchool();
                 startTime = Date.now();
                 gameActive = true;
+                
+                setupMobileControls(); // Init touch listeners
                 update();
             }
+
+            // --- Existing Game Logic Below ---
 
             function playDoorSound(type) {
                 const osc = audioCtx.createOscillator();
@@ -539,11 +729,18 @@
                     staminaFill.style.width = player.stamina + "%";
 
                     let pSpeed = isSprinting ? 5.6 : 2.8;
+                    // Note: 'a' and 'd' inputs are preserved for keyboard rotation, 
+                    // but on mobile swipe updates player.dir directly.
                     if (input.a) player.dir -= 0.065;
                     if (input.d) player.dir += 0.065;
+                    
                     let pMX = input.w ? Math.cos(player.dir) * pSpeed : input.s ? -Math.cos(player.dir) * pSpeed : 0;
                     let pMY = input.w ? Math.sin(player.dir) * pSpeed : input.s ? -Math.sin(player.dir) * pSpeed : 0;
 
+                    // Strafe logic (A/D now map to strafe on mobile if we wanted, but let's stick to rotation for buttons and swipe for look)
+                    // If you wanted strafe buttons:
+                    // if (input.a_strafe) { ... } 
+                    
                     const checkWall = (x, y) => {
                         let tile = map[Math.floor(y / BLOCK_SIZE)][Math.floor(x / BLOCK_SIZE)];
                         return tile === 0 || tile === 3;
